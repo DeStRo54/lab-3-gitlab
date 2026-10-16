@@ -114,7 +114,9 @@
 
     - name: Wait for GitLab readiness
       ansible.builtin.uri:
-        url: "{{ gitlab_url }}/-/readiness"
+        url: "http://127.0.0.1/-/readiness"
+        headers:
+          Host: "{{ gitlab_address }}"
         status_code: 200
         return_content: false
         timeout: 15
