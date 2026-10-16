@@ -1,0 +1,143 @@
+---
+- name: Install GitLab CE on Debian 12
+  hosts: gitlab_server
+  become: true
+  gather_facts: true
+
+  vars:
+    gitlab_address: "192.168.0.188"
+    gitlab_url: "http://{{ gitlab_address }}"
+    registry_url: "http://{{ gitlab_address }}:5050"
+
+  tasks:
+    - name: Check operating system
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Debian'
+          - ansible_facts['distribution_major_version'] == '12'
+        fail_msg: "This playbook is intended for Debian 12."
+
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - openssh-server
+          - tzdata
+          - perl
+          - gnupg
+        state: present
+        update_cache: true
+
+    - name: Enable SSH
+      ansible.builtin.service:
+        name: ssh
+        enabled: true
+        state: started
+
+    - name: Collect service information
+      ansible.builtin.service_facts:
+
+    - name: Stop standalone Nginx from Lab 1
+      ansible.builtin.systemd_service:
+        name: nginx
+        state: stopped
+        enabled: false
+      when: "'nginx.service' in ansible_facts['services']"
+
+    - name: Download official GitLab CE repository script
+      ansible.builtin.get_url:
+        url: https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.deb.sh
+        dest: /root/gitlab-ce-repository.sh
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Add GitLab CE package repository
+      ansible.builtin.command:
+        cmd: /bin/bash /root/gitlab-ce-repository.sh
+        creates: /etc/apt/sources.list.d/gitlab_gitlab-ce.list
+
+    - name: Create GitLab configuration directory
+      ansible.builtin.file:
+        path: /etc/gitlab
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Configure GitLab and Registry for limited memory
+      ansible.builtin.blockinfile:
+        path: /etc/gitlab/gitlab.rb
+        create: true
+        owner: root
+        group: root
+        mode: "0600"
+        marker: "# {mark} ANSIBLE LAB3"
+        block: |
+          external_url '{{ gitlab_url }}'
+
+          letsencrypt['enable'] = false
+          nginx['listen_port'] = 80
+          nginx['listen_https'] = false
+
+          registry_external_url '{{ registry_url }}'
+          gitlab_rails['registry_enabled'] = true
+          registry_nginx['listen_port'] = 5050
+          registry_nginx['listen_https'] = false
+
+          puma['worker_processes'] = 0
+          sidekiq['concurrency'] = 5
+
+          prometheus_monitoring['enable'] = false
+          gitlab_kas['enable'] = false
+
+          gitlab_rails['env'] = {
+            'MALLOC_CONF' => 'dirty_decay_ms:1000,muzzy_decay_ms:1000'
+          }
+
+    - name: Install GitLab CE
+      ansible.builtin.apt:
+        name: gitlab-ce
+        state: present
+        update_cache: true
+      environment:
+        EXTERNAL_URL: "{{ gitlab_url }}"
+      async: 2400
+      poll: 15
+
+    - name: Apply GitLab configuration
+      ansible.builtin.command: gitlab-ctl reconfigure
+      async: 1800
+      poll: 15
+      changed_when: true
+
+    - name: Wait for GitLab readiness
+      ansible.builtin.uri:
+        url: "{{ gitlab_url }}/-/readiness"
+        status_code: 200
+        return_content: false
+        timeout: 15
+      register: gitlab_ready
+      until: gitlab_ready.status | default(0) == 200
+      retries: 60
+      delay: 10
+
+    - name: Check Registry endpoint
+      ansible.builtin.uri:
+        url: "{{ registry_url }}/v2/"
+        status_code:
+          - 200
+          - 401
+        timeout: 15
+      register: registry_ready
+      until: registry_ready.status | default(0) in [200, 401]
+      retries: 30
+      delay: 10
+
+    - name: Show access URLs
+      ansible.builtin.debug:
+        msg:
+          - "GitLab: {{ gitlab_url }}"
+          - "Registry: {{ registry_url }}"
+          - "Read the initial root password directly on the server."
